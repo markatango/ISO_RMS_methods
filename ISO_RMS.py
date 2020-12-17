@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[52]:
+# In[1]:
 
 
 import pandas as pd
@@ -10,145 +10,160 @@ from matplotlib import pyplot as plt
 get_ipython().run_line_magic('matplotlib', 'inline')
 
 
-# In[53]:
+# In[13]:
 
 
 df_mm400 = pd.read_excel("./data/MM400_HF2_5_5_5.xlsx")
 
 
-# In[54]:
+# In[14]:
 
 
 df_nrwm = pd.read_excel("./data/NRWM_HF2_5_5_5.xlsx", sheet_name=1)
 
 
-# In[55]:
+# In[15]:
 
 
 df_mm400.head()
 
 
-# In[56]:
+# In[16]:
 
 
 df_nrwm.head()
 
 
-# In[57]:
+# In[17]:
 
 
-def sq(x):
+# Set configuration constants
+tTimeBase = 1e-6
+thresholdHi = 0.9
+thresholdLo = 0.1
+
+
+# In[18]:
+
+
+# helpers
+def sq(x): 
     return x*x
 
-def findEndOfWeldCandidates(df, field, threshHi, threshLo):
-    threshHi = threshHi
-    threshLo = threshLo
-    sqThreshHi = sq(threshHi)
-    sqThreshLo = sq(threshLo)
-    mss = 0
-    mssHiList = []
-    mssLoList = []
-    for i in df.index:
-        n=i+1
-        mss = 1/n * (i*mss + sq(df.loc[i,field]))
-        if sq(df.loc[n-1,field])  > mss * sq(threshHi) and sq(df.loc[n,field]) < mss * sq(threshHi):
-            mssHiList.append((n,mss))
-        if sq(df.loc[n-1,field])  > mss * sq(threshLo) and sq(df.loc[n,field]) < mss * sq(threshLo):
-            mssLoList.append((n,mss))
+
+def plotResults(**kwargs):
+    
+### Plot results ###
+    
+#     df = dataFrame of TIME and CURRENT values
+#     valueField: string -- name of dataFrame field with current values
+#     timeField: string -- name of dataFrame field with time values
+#     hiThresholdPoint: tuple (<time>, <value>) -- value of point where instantaneous current crosses the high threshold 
+#     loThresholdPoint: tuple (<time>, <value>) -- value of point where instantaneous current crosses the low threshold
+#     thresholds: tuple (<high threshold>, <low threshold>) -- threshold values in interval (0 , 1]
+#     ylimits: tuple (ymin, ymax) -- vertical extents of plot
+
+    df = kwargs["df"]
+    valueField = kwargs["valueField"]
+    timeField = kwargs["timeField"]
+    ISO_RMS = kwargs["ISO_RMS"]
+    hiThresholdPoint = kwargs["hiThresholdPoint"]
+    loThresholdPoint = kwargs["loThresholdPoint"]
+    thresholds = kwargs["thresholds"]
+    yLimits = kwargs["yLimits"]
+
         
-    return mssHiList, mssLoList
+    xHi, yHi = (hiThresholdPoint[0], hiThresholdPoint[1])
+    xLo, yLo = (loThresholdPoint[0], loThresholdPoint[1])
+    
+    xMin, xMax = 0, df[timeField].values[-1]*tTimeBase
+    yMin, yMax = yLimits
+    
+    threshHi, threshLo = thresholds
+    
+    timeScale = 1/tTimeBase
+
+    f, ax = plt.subplots(1,1,figsize=(15,10))
+    
+    # Plot critical points
+    ax.plot(xHi,yHi,"bs",markersize=10, fillstyle='none')
+    ax.plot(xLo,yLo,"gs",markersize=10, fillstyle='none')
+    
+    # Plot some convenience lines and text
+    ax.hlines([ISO_RMS, threshHi*ISO_RMS, threshLo*ISO_RMS], 0, xMax, linestyles='dashed', colors=["blue", "red", "red"])
+    ax.vlines(xHi, 0, yMax - 0.1, linestyles='dashed', colors='red')
+    ax.vlines(xLo, 0, 0.6, linestyles='dashed', colors='red')
+    
+    legend = ["Qualifying point", "Qualifying point",
+              f"ISO RMS", f"{thresholds[0]:.0%}",f"{thresholds[1]:.0%}"        ]
+    ax.legend(legend,loc='best')
+    
+    # Plot instantaneous data
+    ax.plot(df[timeField]*tTimeBase, df[valueField],"ro")
+    ax.plot(df[timeField]*tTimeBase, df[valueField])
+    
+    title = f"RMS measurement time = {1000*xHi:.3} mSec\nCurrent flow time = {1000*xLo:.3} mSec\nISO RMS: {ISO_RMS:.5} kA"
+    plt.title(title)
+    
+    ax.set_xlabel("Time (uSec)")
+    ax.set_ylabel("Current (kA)")
+    
+    ax.grid()
+    plt.savefig("figs/ISORMS.png",bbox_inches="tight")
+    #plt.show()
+   # ax.savefig("figs/ISORMS.png",bbox_inches="tight")
+
+
+# In[19]:
+
+
+# main process
+def calculateISO_RMS(df, valueField, timeField, threshHi, threshLo):
+    
+    meanSquare = 0
+    index = 0
+    
+    # Capture and store the points where the instantaneous value crosses the high and low threshold of the RMS value
+    #  computed up to that point.
+    # Each point is described by a tuple: (dataPoint_time, dataPoint_value)
+    candidateHi = (0, 0)
+    candidateLo = (0, 0)
+    ISO_meanSquare = 0
+    dataPoint_last = df.loc[0,valueField]
+    
+    # Read in the data, compute RMS using "on-line" method, and test for candidacy 
+    # Dataframe index is continguous integers starting at 0
+    for i in df.index:
+        if i > 0:
+            dataPoint_last = df.loc[i-1,valueField]
+            dataPoint_next = df.loc[i,valueField]
+            timeNext = df.loc[i,timeField]*tTimeBase
+        
+            meanSquare = 1/i * ((i-1)*meanSquare + sq(dataPoint_next)) # on-line calculation
+
+            # We do comparison tests with mean square values to avoid computation burden of doing a square-root each time.
+            # We capture points that qualify as a high to low transition across the high threshold point.  
+            # In the case of high ripple or other irregularities in the instantaneous current signal, the last point
+            #  captured will represent the final transition point.
+            if sq(dataPoint_last) > meanSquare * sq(threshHi) and sq(dataPoint_next) < meanSquare * sq(threshHi):
+                candidateHi = (timeNext, dataPoint_next)
+                ISO_meanSquare = meanSquare
+
+            # For the high to low transistion acrosss the low threshold point, we compare to the last mean square 
+            #  value detected by the last high to low transition across the high threshold point
+            if sq(dataPoint_last)  > ISO_meanSquare * sq(threshLo) and sq(dataPoint_next) < ISO_meanSquare * sq(threshLo):
+                candidateLo =  (timeNext, dataPoint_next)
+        #print(candidateHi, candidateLo)
+    ISO_RMS = np.sqrt(ISO_meanSquare)
+    return ISO_RMS, candidateHi, candidateLo
                             
 
 
-# In[67]:
+# In[20]:
 
 
-def sq(x):
-    return x*x
-
-def findEndOfWeldCandidates_PeakCurrentMethod(df, field, threshHi, threshLo):
-    threshHi = threshHi
-    threshLo = threshLo
-    sqThreshHi = sq(threshHi)
-    sqThreshLo = sq(threshLo)
-    mss = 0
-    mssHiList = []
-    mssLoList = []
-    peak = 0
-    for i in df.index:
-        n=i+1
-        if df.loc[n-1,field] >= peak:
-            peak = df.loc[n-1,field]
-        mss = 1/n * (i*mss + sq(df.loc[i,field]))
-        if df.loc[n-1,field]  > peak * threshHi and df.loc[n,field] < peak * threshHi:
-            mssHiList.append((n,mss))
-        if df.loc[n-1,field]  > peak * threshLo and df.loc[n,field] < peak * threshLo:
-            mssLoList.append((n,mss))
-        
-    return mssHiList, mssLoList,peak
-                            
-
-
-# In[68]:
-
-
-def plotResults(df, field, timeField, mssHiList, mssLoList, threshHi, threshLO, ymin, ymax):
-    xHi = mssHiList[-1][0]
-    yHi = np.sqrt(mssHiList[-1][1])
-    xLo = mssLoList[-1][0]
-    yLo = np.sqrt(mssLoList[-1][1])
-
-    f, ax = plt.subplots(1,1,figsize=(15,10))
-    ax.plot(df[timeField], df[field],"ro")
-    ax.plot(df[timeField], df[field])
-    ax.plot(df.loc[xHi,timeField],df.loc[xHi,field],"bs",markersize=10)
-    ax.plot(df.loc[xLo,timeField],df.loc[xLo,field],"gs",markersize=10)
-    #hlines(y, xmin, xmax, colors='k', linestyles='solid', label='', \*, data=None, \*\*kwargs)[source]
-    ax.hlines([yHi,threshHi*yHi,0.1*yHi],0,12000)
-    ax.vlines(df.loc[xHi,timeField],0,1.1)
-    ax.vlines(df[timeField][xLo],0,0.6)
-    ax.text(df.loc[xHi,timeField]+200,yHi+.02,"100% I_ISO_RMS" )
-    ax.text(df.loc[xHi,timeField]+200,threshHi*yHi +.02,f"{threshHi:.0%} I_ISO_RMS" )
-    ax.text(df.loc[xHi,timeField]+200,threshLo*yHi +.02,f"{threshLo:.0%} I_ISO_RMS" )
-    ax.text(df.loc[xHi,timeField]+500,np.max(df[field]),f"ISO RMS = {yHi:.3} kA",fontsize=18 )
-    ax.set_xlabel("Time (uSec)")
-    ax.set_ylabel("Current (kA)")
-    #ax.legend(["Samples","","Final 'first point below threshold'"])
-    ax.grid()
-    plt.show()
-
-
-# In[88]:
-
-
-def plotResults_PeakCurrentMethod(df, field, timeField, peak, mssHiList, mssLoList, threshHi, threshLO, ymin, ymax):
-    xHi = mssHiList[-1][0]
-    yHi = np.sqrt(mssHiList[-1][1])
-    xLo = mssLoList[-1][0]
-    yLo = np.sqrt(mssLoList[-1][1])
-
-    f, ax = plt.subplots(1,1,figsize=(15,10))
-    ax.plot(df[timeField], df[field],"ro")
-    ax.plot(df[timeField], df[field])
-    ax.plot(df.loc[xHi,timeField],df.loc[xHi,field],"bs",markersize=10)
-    ax.plot(df.loc[xLo,timeField],df.loc[xLo,field],"gs",markersize=10)
-    #hlines(y, xmin, xmax, colors='k', linestyles='solid', label='', \*, data=None, \*\*kwargs)[source]
-    ax.hlines([peak,threshHi*peak,0.1*peak],0,12000)
-    ax.vlines(df.loc[xHi,timeField],0,1.1)
-    ax.vlines(df[timeField][xLo],0,0.6)
-    ax.text(df.loc[xHi,timeField]+200,peak+.02,"100% I_Peak" )
-    ax.text(df.loc[xHi,timeField]+200,threshHi*peak +.02,f"{threshHi:.0%} I_Peak" )
-    ax.text(df.loc[xHi,timeField]+200,threshLo*peak +.02,f"{threshLo:.0%} I_Peak" )
-    ax.text(df.loc[xHi,timeField]+500,np.max(df[field]),f"ISO RMS = {yHi:.3} kA",fontsize=18 )
-    ax.set_xlabel("Time (uSec)")
-    ax.set_ylabel("Current (kA)")
-    #ax.legend(["Samples","","Final 'first point below threshold'"])
-    ax.grid()
-    plt.show()
-
-
-# In[89]:
-
+df = df_mm400
+#df = df_nrwm
 
 field_mm400 = "C"
 field_nrwm = "C"
@@ -160,38 +175,26 @@ threshHi = 0.9
 threshLo = 0.1
 
 
-# In[90]:
+# In[21]:
 
 
-mssHiList, mssLoList = findEndOfWeldCandidates(df_mm400, field_mm400, threshHi, threshLo)
-plotResults(df_mm400, field_mm400, timeField_mm400,  mssHiList, mssLoList, threshHi, threshLo, 0, 1.2)
-
-
-# In[91]:
-
-
-mssHiList, mssLoList = findEndOfWeldCandidates(df_nrwm, field_nrwm, threshHi, threshLo)
-plotResults(df_nrwm, field_nrwm, timeField_nrwm, mssHiList, mssLoList, threshHi, threshLo, 0, 1.2)
+# def findEndOfWeldCandidates(df, field, threshHi, threshLo):
+ISO_RMS, candidateHi, candidateLo = calculateISO_RMS(df, field_mm400,timeField_mm400, threshHi, threshLo)
+# def  plotResults(df, valueField, timeField, hiThresholdPoint, loThresholdPoint, thresholds, ylimits):
+plotResults(df=df, 
+            valueField=field_mm400, 
+            timeField=timeField_mm400, 
+            ISO_RMS=ISO_RMS, 
+            hiThresholdPoint=candidateHi, 
+            loThresholdPoint=candidateLo, 
+            thresholds=(0.9, 0.1), 
+            yLimits=(0, 1.2))
 
 
 # In[ ]:
 
 
 
-
-
-# In[92]:
-
-
-mssHiList, mssLoList,peak = findEndOfWeldCandidates_PeakCurrentMethod(df_mm400, field_mm400, threshHi, threshLo)
-plotResults_PeakCurrentMethod(df_mm400, field_mm400, timeField_mm400, peak, mssHiList, mssLoList, threshHi, threshLo, 0, 1.2)
-
-
-# In[93]:
-
-
-mssHiList, mssLoList,peak = findEndOfWeldCandidates_PeakCurrentMethod(df_nrwm, field_nrwm, threshHi, threshLo)
-plotResults_PeakCurrentMethod(df_nrwm, field_nrwm, timeField_nrwm, peak, mssHiList, mssLoList, threshHi, threshLo, 0, 1.2)
 
 
 # In[ ]:
